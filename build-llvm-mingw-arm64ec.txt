@@ -1,0 +1,18 @@
+# llvm-mingw (clang) cross file for arm64ec. Upstream build-arm64x.txt needs GCC -marm64x;
+# with clang the ARM64 and ARM64EC halves are built separately and joined by an ARM64X forwarder.
+[binaries]
+c = 'arm64ec-w64-mingw32-clang'
+cpp = 'arm64ec-w64-mingw32-clang++'
+ar = 'arm64ec-w64-mingw32-ar'
+strip = 'arm64ec-w64-mingw32-strip'
+windres = 'arm64ec-w64-mingw32-windres'
+widl-mingw-tools-fallback = 'aarch64-w64-mingw32-widl'
+
+[properties]
+needs_exe_wrapper = true
+
+[host_machine]
+system = 'windows'
+cpu_family = 'aarch64'
+cpu = 'arm64ec'
+endian = 'little'
