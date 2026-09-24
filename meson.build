@@ -20,6 +20,7 @@ enable_renderdoc          = get_option('enable_renderdoc')
 enable_descriptor_qa      = get_option('enable_descriptor_qa')
 enable_extended_emulation = get_option('enable_extended_emulation')
 enable_trace              = get_option('enable_trace')
+enable_umd                = get_option('enable_umd')
 
 if enable_trace == 'auto'
   enable_trace = vkd3d_debug
@@ -48,6 +49,10 @@ endif
 
 if enable_extended_emulation
   add_project_arguments('-DVKD3D_ENABLE_EXTENDED_EMULATION', language : 'c')
+endif
+
+if enable_umd
+  add_project_arguments('-DVKD3D_BUILD_UMD', language : 'c')
 endif
 
 if not enable_trace

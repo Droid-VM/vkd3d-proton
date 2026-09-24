@@ -870,6 +870,16 @@ void vkd3d_instance_deduce_config_flags_from_environment(void)
         INFO("Shader cache is explicitly disabled, relying solely on application caches.\n");
         vkd3d_config_flag_global_add(VKD3D_CONFIG_FLAG(PIPELINE_LIBRARY_APP_CACHE_ONLY));
     }
+#ifdef VKD3D_BUILD_UMD
+    else if (!*env)
+    {
+        /* As a user-mode driver we run inside every D3D12 process, dwm.exe included, whose working
+         * directory is often System32 or read-only. The default cache lives in the working directory,
+         * so only use a disk cache where one was explicitly asked for. */
+        INFO("User-mode driver without VKD3D_SHADER_CACHE_PATH, relying solely on application caches.\n");
+        vkd3d_config_flag_global_add(VKD3D_CONFIG_FLAG(PIPELINE_LIBRARY_APP_CACHE_ONLY));
+    }
+#endif
 
     /* If we're using a global shader cache, it's meaningless to use PSO caches. */
     if (!VKD3D_CONFIG_FLAG_IS_SET(PIPELINE_LIBRARY_APP_CACHE_ONLY))
