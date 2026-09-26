@@ -4030,8 +4030,10 @@ static void d3d12_resource_destroy(struct d3d12_resource *resource, struct d3d12
 
     vkd3d_descriptor_debug_unregister_cookie(device->descriptor_qa_global_info, resource->res.cookie);
 
+    /* Borrowed images still own the wrapper's stores, views and device
+     * reference. Only the VkImage and its memory belong to the caller. */
     if (resource->flags & VKD3D_RESOURCE_EXTERNAL)
-        return;
+        goto free_wrapper;
 
     vkd3d_free(resource->sparse.tiles);
     vkd3d_free(resource->sparse.tilings);
@@ -4070,6 +4072,7 @@ static void d3d12_resource_destroy(struct d3d12_resource *resource, struct d3d12
         vkd3d_breadcrumb_tracer_unregister_placed_resource(resource->heap, resource);
 #endif
 
+free_wrapper:
     vkd3d_private_store_destroy(&resource->private_store);
     if (resource->heap)
         d3d12_heap_decref(resource->heap);
@@ -4367,6 +4370,35 @@ HRESULT d3d12_resource_create_borrowed(struct d3d12_device *device, const D3D12_
     }
 
     *resource = object;
+    return hr;
+}
+
+HRESULT vkd3d_create_image_resource(ID3D12Device *iface,
+        const struct vkd3d_image_resource_create_info *info, ID3D12Resource **resource)
+{
+    struct d3d12_resource *object;
+    D3D12_RESOURCE_DESC1 desc;
+    HRESULT hr;
+
+    if (!iface || !info || !info->vk_image || !resource)
+        return E_INVALIDARG;
+    *resource = NULL;
+    desc = (D3D12_RESOURCE_DESC1) {
+        .Dimension = info->desc.Dimension,
+        .Alignment = info->desc.Alignment,
+        .Width = info->desc.Width,
+        .Height = info->desc.Height,
+        .DepthOrArraySize = info->desc.DepthOrArraySize,
+        .MipLevels = info->desc.MipLevels,
+        .Format = info->desc.Format,
+        .SampleDesc = info->desc.SampleDesc,
+        .Layout = info->desc.Layout,
+        .Flags = info->desc.Flags,
+    };
+    hr = d3d12_resource_create_borrowed(impl_from_ID3D12Device((d3d12_device_iface *)iface), &desc,
+            (UINT64)info->vk_image, &object);
+    if (SUCCEEDED(hr))
+        *resource = (ID3D12Resource *)&object->ID3D12Resource_iface;
     return hr;
 }
 

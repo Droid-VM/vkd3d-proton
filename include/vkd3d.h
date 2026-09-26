@@ -101,6 +101,11 @@ struct vkd3d_image_resource_create_info
     D3D12_RESOURCE_STATES present_state;
 };
 
+/* Wrap a live VkImage on this device. The caller retains ownership of the
+ * image and its memory until the returned resource has been released. */
+HRESULT vkd3d_create_image_resource(ID3D12Device *device,
+        const struct vkd3d_image_resource_create_info *info, ID3D12Resource **resource);
+
 HRESULT vkd3d_create_instance(const struct vkd3d_instance_create_info *create_info,
         struct vkd3d_instance **instance);
 ULONG vkd3d_instance_decref(struct vkd3d_instance *instance);
