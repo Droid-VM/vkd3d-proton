@@ -2584,6 +2584,9 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
         if (physical_device_info->mesh_shader_features.meshShader)
             required_stages |= VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT;
 
+        INFO("EXT_dgc: enabled=%u supported stages %#x required stages %#x",
+                physical_device_info->device_generated_commands_features.deviceGeneratedCommands,
+                supported_stages, required_stages);
         if ((supported_stages & required_stages) != required_stages)
         {
             /* Can be relaxed if needed in the wild, but in principle, everything needs to be supported

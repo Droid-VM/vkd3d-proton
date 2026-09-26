@@ -1920,6 +1920,13 @@ static HRESULT d3d12_root_signature_init_global(struct d3d12_root_signature *roo
         if (push_constant_range.size > vk_device_properties->limits.maxPushConstantsSize)
             d3d12_root_signature_add_common_flags(root_signature, VKD3D_ROOT_SIGNATURE_USE_PUSH_CONSTANT_UNIFORM_BLOCK);
 
+    /* ExecuteIndirect state templates need to select root state per dispatch.
+     * Without device generated commands, the compute fallback supplies that
+     * state through a per-dispatch uniform buffer, so compile compute shaders
+     * with the same lowering even when the root signature fits in push constants. */
+    if (!device->device_info.device_generated_commands_features.deviceGeneratedCommands)
+        root_signature->compute.flags |= VKD3D_ROOT_SIGNATURE_USE_PUSH_CONSTANT_UNIFORM_BLOCK;
+
     d3d12_root_signature_init_extra_bindings(root_signature, &info);
 
     /* Individual pipeline types may opt-in or out-of using the push UBO descriptor set. */

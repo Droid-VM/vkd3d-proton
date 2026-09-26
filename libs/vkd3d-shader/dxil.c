@@ -422,7 +422,14 @@ static dxil_spv_bool dxil_output_remap(void *userdata, const dxil_spv_d3d_stream
         const struct vkd3d_shader_transform_feedback_element *e = &xfb_info->elements[i];
 
         /* TODO: Stream index matching? */
-        if (!ascii_strcasecmp(e->semantic_name, d3d_output->semantic) && e->semantic_index == d3d_output->semantic_index)
+#ifdef VKD3D_BUILD_UMD
+        /* The DDI exposes registers, not the original DXIL semantic names.
+         * d3d12_pipeline.c encodes register/component as the semantic index. */
+        if (e->semantic_name && e->semantic_index == 4 * d3d_output->start_row + d3d_output->start_col)
+#else
+        if (e->semantic_name && !ascii_strcasecmp(e->semantic_name, d3d_output->semantic)
+                && e->semantic_index == d3d_output->semantic_index)
+#endif
         {
             xfb_element = e;
             break;
