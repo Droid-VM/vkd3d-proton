@@ -4996,6 +4996,49 @@ ULONG vkd3d_resource_decref(ID3D12Resource *resource)
     return d3d12_resource_decref(impl_from_ID3D12Resource(resource));
 }
 
+#ifdef VKD3D_BUILD_UMD
+
+/* win3d UMD bridge: the outer D3D12 runtime implements CPU-visible heap
+ * mapping, WriteToSubresource and ReadFromSubresource itself, on top of the
+ * driver's pfnMapHeap pointer and pfnCheckSubresourceInfo layout. The
+ * ID3D12Resource API deliberately withholds both for UNKNOWN-layout textures
+ * (only a NULL map is legal there), so expose exactly what the inner
+ * WriteToSubresource/ReadFromSubresource would use. */
+HRESULT vkd3d_acquire_resource_cpu_pointer(ID3D12Resource *resource, void **data)
+{
+    struct d3d12_resource *object = impl_from_ID3D12Resource(resource);
+
+    TRACE("resource %p, data %p.\n", resource, data);
+
+    if (!data || !d3d12_resource_is_texture(object) ||
+            !d3d12_resource_is_cpu_accessible(object) || !object->mem.cpu_address)
+        return E_INVALIDARG;
+
+    d3d12_resource_get_map_ptr(object, data);
+    return S_OK;
+}
+
+HRESULT vkd3d_get_resource_subresource_layout(ID3D12Resource *resource, unsigned int subresource,
+        UINT64 *offset, UINT64 *row_pitch, UINT64 *depth_pitch)
+{
+    struct d3d12_resource *object = impl_from_ID3D12Resource(resource);
+    const struct vkd3d_subresource_layout *layout;
+
+    TRACE("resource %p, subresource %u.\n", resource, subresource);
+
+    if (!d3d12_resource_is_texture(object) || !object->subresource_layouts ||
+            subresource >= d3d12_resource_get_sub_resource_count(object))
+        return E_INVALIDARG;
+
+    layout = &object->subresource_layouts[subresource];
+    *offset = layout->offset;
+    *row_pitch = layout->row_pitch;
+    *depth_pitch = layout->depth_pitch;
+    return S_OK;
+}
+
+#endif /* VKD3D_BUILD_UMD */
+
 /* CBVs, SRVs, UAVs */
 static struct vkd3d_view *vkd3d_view_create(enum vkd3d_view_type type)
 {

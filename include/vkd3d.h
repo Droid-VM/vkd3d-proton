@@ -129,6 +129,12 @@ void vkd3d_unlock_vk_queue(ID3D12CommandQueue *queue);
 void vkd3d_enqueue_initial_transition(ID3D12CommandQueue *queue, ID3D12Resource *resource);
 
 ULONG vkd3d_resource_decref(ID3D12Resource *resource);
+#ifdef VKD3D_BUILD_UMD
+/* win3d UMD bridge: see resource.c; withheld by ID3D12Resource on purpose. */
+HRESULT vkd3d_acquire_resource_cpu_pointer(ID3D12Resource *resource, void **data);
+HRESULT vkd3d_get_resource_subresource_layout(ID3D12Resource *resource, unsigned int subresource,
+        UINT64 *offset, UINT64 *row_pitch, UINT64 *depth_pitch);
+#endif
 ULONG vkd3d_resource_incref(ID3D12Resource *resource);
 
 HRESULT vkd3d_serialize_root_signature(const D3D12_ROOT_SIGNATURE_DESC *desc,
