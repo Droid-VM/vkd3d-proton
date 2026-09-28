@@ -748,7 +748,7 @@ static HRESULT vkd3d_get_image_create_info(struct d3d12_device *device,
         format = resource->format;
     }
 
-    if (heap_properties && is_cpu_accessible_heap(heap_properties) &&
+    if (heap_properties && is_cpu_accessible_system_memory_heap(heap_properties) &&
             (format->vk_aspect_mask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)))
     {
         FIXME("Creating depth-stencil images in system memory is not supported.\n");
