@@ -1509,8 +1509,17 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
 
     if (dxil_spv_parsed_blob_get_entry_point_demangled_name(blob, 0, &quirk_entry) != DXIL_SPV_SUCCESS)
     {
-        ret = VKD3D_ERROR_INVALID_SHADER;
-        goto end;
+        /* dxilconv can emit a hull shader with a null control-point entry
+         * and a patch-constant function. dxil-spirv synthesizes its passthrough
+         * entry, but does not enumerate a name for it. Let the converter
+         * validate this form instead of rejecting it during quirk lookup. */
+        if (shader_interface_info->stage == VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)
+            quirk_entry = "";
+        else
+        {
+            ret = VKD3D_ERROR_INVALID_SHADER;
+            goto end;
+        }
     }
 
     quirks = vkd3d_shader_compile_arguments_select_quirks(compiler_args, hash, quirk_entry);
