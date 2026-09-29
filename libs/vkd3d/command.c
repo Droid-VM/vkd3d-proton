@@ -9060,6 +9060,9 @@ static bool d3d12_command_list_emit_multi_dispatch_indirect_count_state(struct d
     VkCommandBuffer vk_patch_cmd_buffer;
     VkMemoryBarrier2 vk_barrier;
     VkDependencyInfo dep_info;
+    bool graphics = signature->pipeline_type == VKD3D_PIPELINE_TYPE_GRAPHICS;
+    const D3D12_INDIRECT_ARGUMENT_DESC *action = &signature->desc.pArgumentDescs[signature->desc.NumArgumentDescs - 1];
+    uint32_t command_words = graphics ? (action->Type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED ? 5 : 4) : 3;
 
     vkd3d_meta_get_multi_dispatch_indirect_state_pipeline(&list->device->meta_ops, &pipeline_info);
 
@@ -9072,7 +9075,7 @@ static bool d3d12_command_list_emit_multi_dispatch_indirect_count_state(struct d
 
     if (!d3d12_command_allocator_allocate_scratch_memory(list->allocator,
             VKD3D_SCRATCH_POOL_KIND_DEVICE_STORAGE,
-            sizeof(VkDispatchIndirectCommand) * max_commands,
+            (VkDeviceSize)command_words * sizeof(uint32_t) * max_commands,
             sizeof(uint32_t), ~0u, dispatch_scratch))
         return false;
 
@@ -9083,7 +9086,9 @@ static bool d3d12_command_list_emit_multi_dispatch_indirect_count_state(struct d
             ~0u, ubo_scratch))
         return false;
 
-    d3d12_command_list_fetch_root_parameter_data(list, &list->compute_bindings, template_scratch.host_ptr);
+    memset(template_scratch.host_ptr, 0, D3D12_MAX_ROOT_COST * sizeof(uint32_t));
+    d3d12_command_list_fetch_root_parameter_data(list,
+            graphics ? &list->graphics_bindings : &list->compute_bindings, template_scratch.host_ptr);
     memcpy(void_ptr_offset(template_scratch.host_ptr, D3D12_MAX_ROOT_COST * sizeof(uint32_t)),
             signature->state_template.compute.source_offsets,
             sizeof(signature->state_template.compute.source_offsets));
@@ -9096,6 +9101,11 @@ static bool d3d12_command_list_emit_multi_dispatch_indirect_count_state(struct d
     args.root_parameter_template_va = template_scratch.va;
     args.stride_words = stride / sizeof(uint32_t);
     args.dispatch_offset_words = signature->state_template.compute.dispatch_offset_words;
+    args.command_words = command_words;
+
+    /* The patch is an action before the next render pass. Do not speculate
+     * that rendering can resume a previous command list across this dispatch. */
+    d3d12_command_list_check_render_pass_validation(list, NULL, true);
 
     /* Keep the state patch in the command buffer which consumes its output.  A
      * post-indirect buffer may be hoisted ahead of this command list, which is
@@ -9123,6 +9133,7 @@ static bool d3d12_command_list_emit_multi_dispatch_indirect_count_state(struct d
     vk_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     vk_barrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
     vk_barrier.dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    if (graphics) vk_barrier.dstStageMask |= VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
     vk_barrier.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_UNIFORM_READ_BIT;
 
     VK_CALL(vkCmdPipelineBarrier2(vk_patch_cmd_buffer, &dep_info));
@@ -18466,6 +18477,112 @@ static void d3d12_command_list_execute_indirect_state_template_compute(
     }
 }
 
+static void d3d12_command_list_execute_indirect_state_template_graphics(
+        struct d3d12_command_list *list, struct d3d12_command_signature *signature,
+        uint32_t max_command_count,
+        struct d3d12_resource *arg_buffer, UINT64 arg_buffer_offset,
+        struct d3d12_resource *count_buffer, UINT64 count_buffer_offset)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
+    VkDeviceAddress arg_va = arg_buffer->res.va + arg_buffer_offset;
+    struct vkd3d_scratch_allocation dispatch_scratch, ubo_scratch;
+    VkDeviceAddress count_va = 0;
+    VkWriteDescriptorSet write;
+    VkDescriptorBufferInfo buf;
+    VkPipelineLayout vk_layout;
+    uint32_t write_set;
+    unsigned int i;
+    bool indexed = signature->desc.pArgumentDescs[signature->desc.NumArgumentDescs - 1].Type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+    uint32_t draw_stride = indexed ? sizeof(VkDrawIndexedIndirectCommand) : sizeof(VkDrawIndirectCommand);
+
+    d3d12_command_list_end_current_render_pass(list, false);
+    d3d12_command_list_end_transfer_batch(list, false);
+
+    /* If this command breaks suspend, need to refresh it now. */
+    d3d12_command_list_update_conditional_rendering_state(list, false);
+
+    if (count_buffer)
+        count_va = count_buffer->res.va + count_buffer_offset;
+
+    if (!d3d12_command_list_emit_multi_dispatch_indirect_count_state(list,
+            signature,
+            arg_va, signature->desc.ByteStride, max_command_count,
+            count_va, &dispatch_scratch, &ubo_scratch))
+        return;
+
+    if ((indexed && !d3d12_command_list_update_index_buffer(list)) ||
+            !d3d12_command_list_begin_render_pass(list, VKD3D_PIPELINE_TYPE_GRAPHICS))
+    {
+        WARN("Failed to update graphics state, ignoring indirect draws.\n");
+        return;
+    }
+
+    vk_write_descriptor_set_from_scratch_push_ubo(&write, &buf, &ubo_scratch,
+            D3D12_MAX_ROOT_COST * sizeof(uint32_t),
+            list->graphics_bindings.root_signature->push_constant_ubo_binding.binding);
+
+    vk_layout = list->graphics_bindings.root_signature->graphics.vk_pipeline_layout;
+    write_set = list->graphics_bindings.root_signature->push_constant_ubo_binding.set;
+
+    /* The GPU patches one root block per draw; argument/count buffers may have
+     * been written earlier in this command list. */
+    for (i = 0; i < max_command_count; i++)
+    {
+        VK_CALL(vkCmdPushDescriptorSetKHR(list->cmd.vk_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                vk_layout, write_set, 1, &write));
+        if (indexed)
+        {
+            d3d12_command_list_update_index_buffer_strip_cut_value(list);
+            VK_CALL(vkCmdDrawIndexedIndirect(list->cmd.vk_command_buffer, dispatch_scratch.buffer,
+                    dispatch_scratch.offset, 1, draw_stride));
+        }
+        else
+            VK_CALL(vkCmdDrawIndirect(list->cmd.vk_command_buffer, dispatch_scratch.buffer,
+                    dispatch_scratch.offset, 1, draw_stride));
+
+        VKD3D_BREADCRUMB_AUX32(i);
+        VKD3D_BREADCRUMB_COMMAND(EXECUTE_INDIRECT_TEMPLATE);
+
+        dispatch_scratch.offset += draw_stride;
+        buf.offset += D3D12_MAX_ROOT_COST * sizeof(uint32_t);
+    }
+
+    /* Restore ordinary root-block binding even if only some root values change. */
+    d3d12_command_list_invalidate_root_parameters(list, &list->graphics_bindings, true, NULL);
+
+    /* Need to clear state to zero if it was part of a command signature. */
+    for (i = 0; i < signature->desc.NumArgumentDescs; i++)
+    {
+        const D3D12_INDIRECT_ARGUMENT_DESC *arg = &signature->desc.pArgumentDescs[i];
+        switch (arg->Type)
+        {
+            case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW:
+            case D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW:
+            case D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW:
+            {
+                uint32_t index = arg->ConstantBufferView.RootParameterIndex;
+                d3d12_command_list_set_root_descriptor(list,
+                        &list->graphics_bindings, index, 0);
+                break;
+            }
+
+            case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT:
+            {
+                uint32_t zeroes[D3D12_MAX_ROOT_COST];
+                memset(zeroes, 0, sizeof(uint32_t) * arg->Constant.Num32BitValuesToSet);
+                d3d12_command_list_set_root_constants(list,
+                        &list->graphics_bindings, arg->Constant.RootParameterIndex,
+                        arg->Constant.DestOffsetIn32BitValues,
+                        arg->Constant.Num32BitValuesToSet, zeroes);
+                break;
+            }
+
+            default:
+                break;
+        }
+    }
+}
+
 enum vkd3d_dgc_mode
 {
     /* When ExecuteIndirect is being called directly by application. */
@@ -19064,6 +19181,12 @@ static void STDMETHODCALLTYPE d3d12_command_list_ExecuteIndirect(d3d12_command_l
                     max_command_count,
                     arg_impl, arg_buffer_offset,
                     count_impl, count_buffer_offset);
+        }
+        else if (sig_impl->pipeline_type == VKD3D_PIPELINE_TYPE_GRAPHICS &&
+                !list->device->device_info.device_generated_commands_features.deviceGeneratedCommands)
+        {
+            d3d12_command_list_execute_indirect_state_template_graphics(list, sig_impl,
+                    max_command_count, arg_impl, arg_buffer_offset, count_impl, count_buffer_offset);
         }
         else
         {
@@ -27462,6 +27585,8 @@ static HRESULT d3d12_command_signature_init_state_template_compute(struct d3d12_
                     signature->state_template.compute.source_offsets[dst_offset_word + j] = (int32_t)src_offset_words;
                 break;
 
+            case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW:
+            case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED:
             case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH:
                 signature->state_template.compute.dispatch_offset_words = src_offset_words;
                 break;
@@ -27966,7 +28091,7 @@ HRESULT d3d12_command_signature_create(struct d3d12_device *device, struct d3d12
     if ((object->requires_state_template = requires_state_template))
     {
         if (!device->device_info.device_generated_commands_features.deviceGeneratedCommands &&
-                pipeline_type != VKD3D_PIPELINE_TYPE_COMPUTE)
+                pipeline_type != VKD3D_PIPELINE_TYPE_COMPUTE && pipeline_type != VKD3D_PIPELINE_TYPE_GRAPHICS)
         {
             FIXME("Device generated commands is not supported by implementation.\n");
             if (VKD3D_CONFIG_FLAG_IS_SET(FAIL_UNSUPPORTED_STATE_TEMPLATE))
@@ -27996,7 +28121,7 @@ HRESULT d3d12_command_signature_create(struct d3d12_device *device, struct d3d12
             if (FAILED(hr = d3d12_command_signature_init_state_template_dgc(object, desc, root_signature, device)))
                 goto err;
         }
-        else if (pipeline_type == VKD3D_PIPELINE_TYPE_COMPUTE)
+        else if (pipeline_type == VKD3D_PIPELINE_TYPE_COMPUTE || pipeline_type == VKD3D_PIPELINE_TYPE_GRAPHICS)
         {
             if (FAILED(hr = d3d12_command_signature_init_state_template_compute(object, desc, root_signature, device)))
                 goto err;

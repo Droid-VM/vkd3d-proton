@@ -5039,6 +5039,7 @@ struct vkd3d_multi_dispatch_indirect_state_args
     VkDeviceAddress root_parameter_template_va;
     uint32_t stride_words;
     uint32_t dispatch_offset_words;
+    uint32_t command_words;
 };
 
 struct vkd3d_multi_dispatch_indirect_ops

@@ -50,6 +50,7 @@ layout(push_constant) uniform Registers
 	Template in_template;
 	uint stride_words;
 	uint dispatch_offset_words;
+	uint command_words;
 };
 
 void main()
@@ -66,14 +67,14 @@ void main()
 
 	uint input_value;
 	int source_offset = in_template.source_word_offsets[gl_LocalInvocationIndex];
-	if (source_offset >= 0)
+	if (active_dispatch && source_offset >= 0)
 		input_value = indirect.values[input_offset_base + source_offset];
 	else
 		input_value = in_template.input_root_parameters[gl_LocalInvocationIndex];
 
 	out_root_parameters.blocks[gl_WorkGroupID.x].values[gl_LocalInvocationIndex] = input_value;
 
-	const uint DISPATCH_NUM_WORDS = 3;
+	uint DISPATCH_NUM_WORDS = command_words;
 	if (gl_LocalInvocationIndex < DISPATCH_NUM_WORDS)
 	{
 		uint dispatch_value;
