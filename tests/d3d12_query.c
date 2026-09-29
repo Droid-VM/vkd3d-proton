@@ -775,6 +775,7 @@ void test_query_heap_cpu_resolve_timestamp(void)
     {
         skip("ID3D12Device15 not supported.\n");
         destroy_test_context(&context);
+        return;
     }
 
     /* There are no feature bits. Native runtime emulates this as necessary. */
@@ -873,6 +874,7 @@ void test_query_heap_cpu_resolve_occlusion(void)
     {
         skip("ID3D12Device15 not supported.\n");
         destroy_test_context(&context);
+        return;
     }
 
     /* There are no feature bits. Native runtime emulates this as necessary. */
