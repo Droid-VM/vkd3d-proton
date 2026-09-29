@@ -5079,7 +5079,10 @@ HRESULT vkd3d_flush_resource_cpu_writes(ID3D12Resource *resource)
                 object, i, offset, extent)))
             return hr;
     }
-    return S_OK;
+    /* Pending transfers only borrow the resource. Record and submit while
+     * the UMD still owns it, so the queue's completion tracking takes a
+     * reference before the application can release it after Unmap. */
+    return vkd3d_memory_transfer_queue_flush(&device->memory_transfers);
 }
 
 #endif /* VKD3D_BUILD_UMD */
