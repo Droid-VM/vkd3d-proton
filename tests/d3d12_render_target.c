@@ -2016,6 +2016,12 @@ void test_renderpass_resolve_suspend_resume(void)
         D3D12_RECT sci;
 
         vkd3d_test_set_context("%s", test->tag);
+        if ((test->intra_breaking_command || test->inter_breaking_command)
+                && !is_vkd3d_proton_device(context.device))
+        {
+            skip("Commands between suspended render passes require vkd3d test behavior overrides.\n");
+            continue;
+        }
         begin_debug_region(context.list, test->tag);
 
         rt_descs[0].BeginningAccess.Type = test->clears[0] ?
