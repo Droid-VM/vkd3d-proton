@@ -6442,6 +6442,14 @@ void test_suballocate_va_alignment(void)
         {
             hr = ID3D12Device_CreateHeap(context.device, &heap_desc, &IID_ID3D12Heap, (void **)&heaps[i]);
             ok(SUCCEEDED(hr), "Failed to create heap, hr #%x.\n", (int)hr);
+            if (FAILED(hr))
+            {
+                /* Only previously created heaps are valid on allocation failure. */
+                while (i)
+                    ID3D12Heap_Release(heaps[--i]);
+                destroy_test_context(&context);
+                return;
+            }
 
             memset(&desc, 0, sizeof(desc));
             desc.Width = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
