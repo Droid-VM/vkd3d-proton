@@ -194,6 +194,7 @@ struct vkd3d_vulkan_info
     bool EXT_memory_budget;
     bool EXT_device_address_binding_report;
     bool EXT_depth_bias_control;
+    bool EXT_primitive_restart_index;
     bool EXT_zero_initialize_device_memory;
     bool EXT_shader_float8;
     bool EXT_present_timing;
@@ -5402,6 +5403,7 @@ struct vkd3d_physical_device_info
     VkPhysicalDeviceImageAlignmentControlFeaturesMESA image_alignment_control_features;
     VkPhysicalDeviceImageAlignmentControlPropertiesMESA image_alignment_control_properties;
     VkPhysicalDeviceDepthBiasControlFeaturesEXT depth_bias_control_features;
+    VkPhysicalDevicePrimitiveRestartIndexFeaturesEXT primitive_restart_index_features;
     VkPhysicalDeviceOpticalFlowFeaturesNV optical_flow_nv_features;
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperative_matrix_features;
     VkPhysicalDeviceZeroInitializeDeviceMemoryFeaturesEXT zero_initialize_device_memory_features;

@@ -8895,9 +8895,35 @@ static bool d3d12_command_list_begin_render_pass(struct d3d12_command_list *list
     return true;
 }
 
-static void d3d12_command_list_check_index_buffer_strip_cut_value(struct d3d12_command_list *list)
+static void d3d12_command_list_update_index_buffer_strip_cut_value(struct d3d12_command_list *list)
 {
+    const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
     struct d3d12_graphics_pipeline_state *graphics = &list->state->graphics;
+
+    /* A 32-bit cut value cannot occur in a 16-bit index buffer. Vulkan
+     * compares against the restart value narrowed to the index type, so
+     * disable restart instead of accidentally treating 0xffff as a cut. */
+    if (list->dynamic_state.active_flags & VKD3D_DYNAMIC_STATE_PRIMITIVE_RESTART)
+    {
+        VK_CALL(vkCmdSetPrimitiveRestartEnable(list->cmd.vk_command_buffer,
+                list->dynamic_state.index_buffer_strip_cut_value != D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED &&
+                vk_primitive_topology_supports_restart(list->dynamic_state.vk_primitive_topology) &&
+                !(list->index_buffer.vk_type == VK_INDEX_TYPE_UINT16 &&
+                  list->dynamic_state.index_buffer_strip_cut_value == D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF)));
+    }
+
+    if (list->device->device_info.primitive_restart_index_features.primitiveRestartIndex)
+    {
+        /* Binding an index buffer resets the custom restart index. Set it
+         * after the index buffer and graphics state have been applied, for
+         * both direct and indirect indexed draws. D3D12 selects the cut
+         * value independently of the index buffer format. */
+        VK_CALL(vkCmdSetPrimitiveRestartIndexEXT(list->cmd.vk_command_buffer,
+                list->dynamic_state.index_buffer_strip_cut_value == D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF
+                        ? 0xffffu : 0xffffffffu));
+        return;
+    }
+
     if (TRACE_ON())
     {
         /* In Vulkan, the strip cut value is derived from the index buffer format. */
@@ -9251,7 +9277,7 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawIndexedInstanced(d3d12_comm
 
     list->cmd.estimated_cost += VKD3D_COMMAND_COST_HIGH;
 
-    d3d12_command_list_check_index_buffer_strip_cut_value(list);
+    d3d12_command_list_update_index_buffer_strip_cut_value(list);
 
     if (!list->predication.fallback_enabled)
         VK_CALL(vkCmdDrawIndexed(list->cmd.vk_command_buffer, index_count_per_instance,
@@ -18852,7 +18878,7 @@ static void STDMETHODCALLTYPE d3d12_command_list_ExecuteIndirect(d3d12_command_l
                 break;
             }
 
-            d3d12_command_list_check_index_buffer_strip_cut_value(list);
+            d3d12_command_list_update_index_buffer_strip_cut_value(list);
 
             if (count_buffer || list->predication.fallback_enabled)
             {

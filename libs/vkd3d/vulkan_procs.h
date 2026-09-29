@@ -276,6 +276,9 @@ VK_DEVICE_EXT_PFN(vkCmdBeginDebugUtilsLabelEXT)
 VK_DEVICE_EXT_PFN(vkCmdEndDebugUtilsLabelEXT)
 VK_DEVICE_EXT_PFN(vkCmdInsertDebugUtilsLabelEXT)
 
+/* VK_EXT_primitive_restart_index */
+VK_DEVICE_EXT_PFN(vkCmdSetPrimitiveRestartIndexEXT)
+
 /* VK_EXT_depth_bias_control */
 VK_DEVICE_EXT_PFN(vkCmdSetDepthBias2EXT)
 
