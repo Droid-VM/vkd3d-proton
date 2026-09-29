@@ -2188,7 +2188,7 @@ void test_depth_bias_behaviour(void)
     D3D12_FEATURE_DATA_D3D12_OPTIONS16 options16;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc;
     ID3D12DescriptorHeap *rtv_heap, *dsv_heap;
-    ID3D12GraphicsCommandList9 *command_list9;
+    ID3D12GraphicsCommandList9 *command_list9 = NULL;
     struct resource_readback rb, rb_no_bias;
     D3D12_RENDER_TARGET_VIEW_DESC rtv_desc;
     D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc;
@@ -2250,10 +2250,7 @@ void test_depth_bias_behaviour(void)
         ID3D12Device_CheckFeatureSupport(context.device, D3D12_FEATURE_D3D12_OPTIONS16, &options16, sizeof(options16));
 
     if (!options16.DynamicDepthBiasSupported)
-    {
         skip("Skipping dynamic depth bias tests.\n");
-        destroy_test_context(&context);
-    }
 
     ds_resource = create_default_texture2d(context.device, 4, 4, 1, 1, DXGI_FORMAT_D32_FLOAT,
             D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE);
