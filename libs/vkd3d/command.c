@@ -15594,6 +15594,16 @@ static void d3d12_command_list_clear_attachment(struct d3d12_command_list *list,
     if (full_clear)
         rect_count = 0;
 
+    /* Load-op clears are not affected by conditional rendering. Emit an
+     * explicit attachment clear instead, preserving the previous contents
+     * when the predicate rejects the clear. Do not defer or discard it. */
+    if (full_clear && list->predication.enabled_on_command_buffer)
+    {
+        full_clear = false;
+        rect_count = 1;
+        rects = &full_rect;
+    }
+
     full_resource_clear = full_clear && vkd3d_rtv_and_aspects_fully_cover_resource(resource, view, clear_aspects);
     /* For committed (non-aliased) resources, we don't transition away from UNDEFINED, so we must do the initial transition. */
     d3d12_command_list_track_resource_usage(list, resource, !full_resource_clear ||
