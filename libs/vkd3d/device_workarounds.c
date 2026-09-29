@@ -1115,6 +1115,12 @@ void vkd3d_physical_device_info_apply_workarounds(struct vkd3d_physical_device_i
 
 bool vkd3d_driver_id_wraps_ssbo_32bit_before_robustness(VkDriverId driver_id)
 {
+    /* Turnip bounds-checks the element index before byte-offset wrapping.
+     * Keep explicit 32-bit wrapping for ByteAddressBuffer accesses, including
+     * when running behind a native D3D12 runtime without test-suite controls. */
+    if (driver_id == VK_DRIVER_ID_MESA_TURNIP)
+        return false;
+
     /* In Vulkan, it's more or less UB when accessing a logical array outside its bounds.
      * Based on this language, it seems like implementations are allowed to wrap the address space
      * beyond 4G (and negative offsets) as long as <4G is the maximum descriptor size.
