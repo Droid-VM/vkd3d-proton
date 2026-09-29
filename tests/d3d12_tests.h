@@ -260,6 +260,7 @@ decl_test(test_graphics_compute_queue_synchronization);
 decl_test(test_early_depth_stencil_tests);
 decl_test(test_conditional_rendering);
 decl_test(test_conditional_copy_resource);
+decl_test(test_conditional_resolve_subresource);
 decl_test(test_bufinfo_instruction_dxbc);
 decl_test(test_bufinfo_instruction_dxil);
 decl_test(test_write_buffer_immediate);

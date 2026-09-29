@@ -12879,6 +12879,136 @@ static void vkd3d_get_resolve_dst_outside_access(struct d3d12_device *device,
     }
 }
 
+/* Native resolves ignore predication. Save the original region, execute the
+ * resolve, then select the resolved bytes or the saved bytes on the GPU. */
+static void d3d12_command_list_resolve_direct_predicated(struct d3d12_command_list *list,
+        struct d3d12_resource *dst, struct d3d12_resource *src,
+        const VkImageResolve2 *resolve, DXGI_FORMAT format, D3D12_RESOLVE_MODE mode)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
+    const struct vkd3d_predicate_ops *ops = &list->device->meta_ops.predicate;
+    struct vkd3d_scratch_allocation scratch;
+    struct vkd3d_predicated_copy_args args;
+    VkCopyImageToBufferInfo2 read = {VK_STRUCTURE_TYPE_COPY_IMAGE_TO_BUFFER_INFO_2};
+    VkCopyBufferToImageInfo2 write = {VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2};
+    VkBufferImageCopy2 region = {VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2};
+    VkImageMemoryBarrier2 image = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+    VkMemoryBarrier2 memory = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    VkDependencyInfo dep = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    VkImageLayout resolve_layout = d3d12_resource_pick_layout(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkDeviceSize size;
+
+    size = (VkDeviceSize)resolve->extent.width * resolve->extent.height * resolve->extent.depth *
+            resolve->dstSubresource.layerCount * dst->format->byte_count;
+    size = align(size, 4);
+    if (size > UINT32_MAX || !d3d12_command_allocator_allocate_scratch_memory(list->allocator,
+            VKD3D_SCRATCH_POOL_KIND_DEVICE_STORAGE, 2 * size, 16, ~0u, &scratch))
+    {
+        d3d12_command_list_mark_as_invalid(list, "Cannot allocate predicated resolve scratch.");
+        return;
+    }
+
+    d3d12_command_list_update_conditional_rendering_state(list, true);
+    d3d12_command_list_invalidate_current_pipeline(list, true);
+    image.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image.image = dst->res.vk_image;
+    image.subresourceRange = vk_subresource_range_from_layers(&resolve->dstSubresource);
+    image.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    image.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    image.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    image.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    image.oldLayout = resolve_layout;
+    image.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    memory.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    memory.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    memory.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    memory.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+    dep.imageMemoryBarrierCount = 1;
+    dep.pImageMemoryBarriers = &image;
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &memory;
+    VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep));
+    dep.memoryBarrierCount = 0;
+
+    region.bufferOffset = scratch.offset + size;
+    region.imageSubresource = resolve->dstSubresource;
+    region.imageOffset = resolve->dstOffset;
+    region.imageExtent = resolve->extent;
+    read.srcImage = dst->res.vk_image;
+    read.srcImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    read.dstBuffer = scratch.buffer;
+    read.regionCount = 1;
+    read.pRegions = &region;
+    VK_CALL(vkCmdCopyImageToBuffer2(list->cmd.vk_command_buffer, &read));
+
+    image.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    image.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    image.dstStageMask = VK_PIPELINE_STAGE_2_RESOLVE_BIT;
+    image.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    image.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    image.newLayout = resolve_layout;
+    VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep));
+    d3d12_command_list_execute_resolve(list, dst, src, 1, resolve, format, mode, VKD3D_RESOLVE_IMAGE_PATH_DIRECT);
+
+    image.srcStageMask = VK_PIPELINE_STAGE_2_RESOLVE_BIT;
+    image.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    image.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    image.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    image.oldLayout = resolve_layout;
+    image.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep));
+    region.bufferOffset = scratch.offset;
+    VK_CALL(vkCmdCopyImageToBuffer2(list->cmd.vk_command_buffer, &read));
+
+    dep.imageMemoryBarrierCount = 0;
+    dep.memoryBarrierCount = 1;
+    memory.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    memory.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    memory.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    memory.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+    VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep));
+    args.predicate_va = list->predication.va;
+    args.src_va = scratch.va;
+    args.dst_va = scratch.va + size;
+    args.word_count = size / 4;
+    VK_CALL(vkCmdBindPipeline(list->cmd.vk_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ops->vk_copy_pipeline));
+    d3d12_command_list_meta_push_data(list, list->cmd.vk_command_buffer,
+            ops->vk_copy_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, sizeof(args), &args);
+    VK_CALL(vkCmdDispatch(list->cmd.vk_command_buffer, min(vkd3d_compute_workgroup_count(args.word_count, 64), 65535u), 1, 1));
+
+    /* Synchronize both the saved transfer data and the conditional shader write. */
+    memory.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    memory.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+    memory.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    memory.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    dep.imageMemoryBarrierCount = 1;
+    image.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    image.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    image.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    image.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    image.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    image.newLayout = resolve_layout;
+    VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep));
+    region.bufferOffset = scratch.offset + size;
+    write.srcBuffer = scratch.buffer;
+    write.dstImage = dst->res.vk_image;
+    write.dstImageLayout = resolve_layout;
+    write.regionCount = 1;
+    write.pRegions = &region;
+    VK_CALL(vkCmdCopyBufferToImage2(list->cmd.vk_command_buffer, &write));
+
+    /* The caller tracks the operation as a resolve, including later barriers. */
+    dep.imageMemoryBarrierCount = 0;
+    memory.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    memory.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    memory.dstStageMask = VK_PIPELINE_STAGE_2_RESOLVE_BIT;
+    memory.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep));
+    d3d12_command_list_update_conditional_rendering_state(list, false);
+    list->cmd.estimated_cost += VKD3D_COMMAND_COST_HIGH;
+}
+
 static void d3d12_command_list_resolve_subresource(struct d3d12_command_list *list,
         struct d3d12_resource *dst_resource, uint32_t dst_subresource_idx,
         struct d3d12_resource *src_resource,
@@ -12937,7 +13067,10 @@ static void d3d12_command_list_resolve_subresource(struct d3d12_command_list *li
     d3d12_command_list_track_resource_usage(list, dst_resource, true);
     d3d12_command_list_track_resource_usage(list, src_resource, true);
 
-    d3d12_command_list_execute_resolve(list, dst_resource, src_resource, 1, resolve, format, mode, path);
+    if (list->predication.va && path == VKD3D_RESOLVE_IMAGE_PATH_DIRECT)
+        d3d12_command_list_resolve_direct_predicated(list, dst_resource, src_resource, resolve, format, mode);
+    else
+        d3d12_command_list_execute_resolve(list, dst_resource, src_resource, 1, resolve, format, mode, path);
 
     vkd3d_get_resolve_dst_outside_access(list->device, dst_resource, path, &dst_outside_stages, &dst_outside_access);
 

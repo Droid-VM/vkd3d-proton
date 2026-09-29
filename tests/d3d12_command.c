@@ -4327,6 +4327,84 @@ void test_conditional_copy_resource(void)
     destroy_test_context(&context);
 }
 
+void test_conditional_resolve_subresource(void)
+{
+    static const uint64_t predicates[] = {0, 1, (uint64_t)1 << 32};
+    static const float green[] = {0.0f, 1.0f, 0.0f, 1.0f};
+    D3D12_HEAP_PROPERTIES heap = {D3D12_HEAP_TYPE_DEFAULT};
+    D3D12_RENDER_TARGET_VIEW_DESC rtv = {0};
+    D3D12_RESOURCE_DESC desc = {0};
+    D3D12_SUBRESOURCE_DATA data[4];
+    uint32_t pixels[4][140];
+    ID3D12Resource *src, *dst, *conditions;
+    struct test_context context;
+    unsigned int p, op, i, j;
+    HRESULT hr;
+
+    if (!init_test_context(&context, NULL))
+        return;
+    conditions = create_upload_buffer(context.device, sizeof(predicates), predicates);
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = 7;
+    desc.Height = 5;
+    desc.DepthOrArraySize = 2;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 4;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    hr = ID3D12Device_CreateCommittedResource(context.device, &heap, D3D12_HEAP_FLAG_NONE,
+            &desc, D3D12_RESOURCE_STATE_RENDER_TARGET, NULL, &IID_ID3D12Resource, (void **)&src);
+    ok(hr == S_OK, "Failed to create source, hr %#x.\n", (unsigned int)hr);
+    rtv.Format = desc.Format;
+    rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY;
+    rtv.Texture2DMSArray.FirstArraySlice = 1;
+    rtv.Texture2DMSArray.ArraySize = 1;
+    ID3D12Device_CreateRenderTargetView(context.device, src, &rtv, context.rtv);
+    ID3D12GraphicsCommandList_ClearRenderTargetView(context.list, context.rtv, green, 0, NULL);
+    transition_resource_state(context.list, src, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+
+    desc.Width = 14;
+    desc.Height = 10;
+    desc.MipLevels = 2;
+    desc.SampleDesc.Count = 1;
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    for (i = 0; i < 4; i++)
+    {
+        for (j = 0; j < 140; j++)
+            pixels[i][j] = 0x11223344 + i;
+        data[i].pData = pixels[i];
+        data[i].RowPitch = (14u >> (i % 2)) * sizeof(uint32_t);
+        data[i].SlicePitch = data[i].RowPitch * (10u >> (i % 2));
+    }
+    for (p = 0; p < ARRAY_SIZE(predicates); p++)
+    for (op = 0; op < 2; op++)
+    {
+        vkd3d_test_set_context("predicate %u, op %u", p, op);
+        hr = ID3D12Device_CreateCommittedResource(context.device, &heap, D3D12_HEAP_FLAG_NONE,
+                &desc, D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void **)&dst);
+        ok(hr == S_OK, "Failed to create destination, hr %#x.\n", (unsigned int)hr);
+        upload_texture_data(dst, data, 4, context.queue, context.list);
+        reset_command_list(context.list, context.allocator);
+        transition_resource_state(context.list, dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RESOLVE_DEST);
+        ID3D12GraphicsCommandList_SetPredication(context.list, conditions, p * sizeof(uint64_t), op);
+        ID3D12GraphicsCommandList_ResolveSubresource(context.list, dst, 3, src, 1, desc.Format);
+        ID3D12GraphicsCommandList_SetPredication(context.list, NULL, 0, 0);
+        transition_resource_state(context.list, dst, D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        for (i = 0; i < 4; i++)
+        {
+            bool resolve = op == D3D12_PREDICATION_OP_EQUAL_ZERO ? predicates[p] != 0 : predicates[p] == 0;
+            check_sub_resource_uint(dst, i, context.queue, context.list,
+                    resolve && i == 3 ? 0xff00ff00 : 0x11223344 + i, 0);
+            reset_command_list(context.list, context.allocator);
+        }
+        ID3D12Resource_Release(dst);
+    }
+    vkd3d_test_set_context(NULL);
+    ID3D12Resource_Release(src);
+    ID3D12Resource_Release(conditions);
+    destroy_test_context(&context);
+}
+
 void test_conditional_rendering(void)
 {
     D3D12_ROOT_SIGNATURE_DESC root_signature_desc;
