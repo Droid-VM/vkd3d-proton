@@ -130,6 +130,8 @@ void vkd3d_enqueue_initial_transition(ID3D12CommandQueue *queue, ID3D12Resource 
 
 ULONG vkd3d_resource_decref(ID3D12Resource *resource);
 #ifdef VKD3D_BUILD_UMD
+/* ClearRootArguments DDI must not reset PSO or other command-list state. */
+void vkd3d_clear_root_arguments(ID3D12GraphicsCommandList *command_list);
 /* win3d UMD bridge: see resource.c; withheld by ID3D12Resource on purpose. */
 HRESULT vkd3d_acquire_resource_cpu_pointer(ID3D12Resource *resource, void **data);
 HRESULT vkd3d_get_resource_subresource_layout(ID3D12Resource *resource, unsigned int subresource,

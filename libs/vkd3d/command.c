@@ -7224,6 +7224,28 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearState(d3d12_command_list_i
     d3d12_command_list_reset_api_state(list, pipeline_state);
 }
 
+#ifdef VKD3D_BUILD_UMD
+void vkd3d_clear_root_arguments(ID3D12GraphicsCommandList *command_list)
+{
+    struct d3d12_command_list *list = impl_from_ID3D12GraphicsCommandList(
+            (d3d12_command_list_iface *)command_list);
+    struct vkd3d_pipeline_bindings *bindings[] = {&list->graphics_bindings, &list->compute_bindings};
+    unsigned int i;
+
+    d3d12_command_list_flush_dgc_batch(list);
+    for (i = 0; i < ARRAY_SIZE(bindings); ++i)
+    {
+        /* The runtime sets the initial PSO before clearing root arguments.
+         * Preserve signatures, descriptor heaps and all non-root state. */
+        memset(bindings[i]->descriptor_tables, 0, sizeof(bindings[i]->descriptor_tables));
+        memset(bindings[i]->root_descriptors, 0, sizeof(bindings[i]->root_descriptors));
+        memset(bindings[i]->root_constants, 0, sizeof(bindings[i]->root_constants));
+        bindings[i]->root_descriptor_active_mask = 0;
+        d3d12_command_list_invalidate_root_parameters(list, bindings[i], true, NULL);
+    }
+}
+#endif
+
 static bool d3d12_command_list_has_depth_stencil_view(struct d3d12_command_list *list)
 {
     const struct d3d12_graphics_pipeline_state *graphics;
