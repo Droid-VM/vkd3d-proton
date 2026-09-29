@@ -11251,6 +11251,143 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyTextureRegion(d3d12_command
     VKD3D_BREADCRUMB_COMMAND(COPY);
 }
 
+/* Transfer commands ignore conditional rendering. Preserve the destination in
+ * scratch and predicate only the compute copy, then transfer the selected bytes
+ * back. This also works for images without attachment or storage usage. */
+static bool d3d12_command_list_copy_resource_predicated(struct d3d12_command_list *list,
+        struct d3d12_resource *dst, struct d3d12_resource *src)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
+    const struct vkd3d_predicate_ops *ops = &list->device->meta_ops.predicate;
+    struct vkd3d_scratch_allocation scratch;
+    struct vkd3d_predicated_copy_args args;
+    VkCopyImageToBufferInfo2 read_info = {VK_STRUCTURE_TYPE_COPY_IMAGE_TO_BUFFER_INFO_2};
+    VkCopyBufferToImageInfo2 write_info = {VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2};
+    VkBufferImageCopy2 region = {VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2};
+    VkImageMemoryBarrier2 images[2];
+    VkMemoryBarrier2 memory = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    VkDependencyInfo dep = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    struct d3d12_resource *resources[2] = {src, dst};
+    VkDeviceSize size;
+    unsigned int level, i;
+
+    if (!list->predication.va || !d3d12_resource_is_texture(src) ||
+            !d3d12_resource_is_texture(dst) || src->desc.SampleDesc.Count != 1 ||
+            dst->desc.SampleDesc.Count != 1 || src->format->vk_format != dst->format->vk_format ||
+            src->format->vk_aspect_mask != VK_IMAGE_ASPECT_COLOR_BIT ||
+            d3d12_resource_desc_is_sampler_feedback(&src->desc))
+        return false;
+
+    d3d12_command_list_track_resource_usage(list, src, true);
+    d3d12_command_list_track_resource_usage(list, dst, true);
+    d3d12_command_list_end_current_render_pass(list, false);
+    d3d12_command_list_end_transfer_batch(list, false);
+    d3d12_command_list_begin_transfer(list);
+    d3d12_command_list_update_conditional_rendering_state(list, true);
+    d3d12_command_list_invalidate_current_pipeline(list, true);
+
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &memory;
+    dep.imageMemoryBarrierCount = 2;
+    dep.pImageMemoryBarriers = images;
+    memset(images, 0, sizeof(images));
+    for (i = 0; i < 2; i++)
+    {
+        images[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        images[i].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        images[i].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        images[i].dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        images[i].dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        images[i].oldLayout = resources[i]->common_layout;
+        images[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        images[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        images[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        images[i].image = resources[i]->res.vk_image;
+        images[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        images[i].subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+        images[i].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+    }
+    memory.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    memory.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    memory.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    memory.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT;
+    VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep));
+    dep.imageMemoryBarrierCount = 0;
+
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = d3d12_resource_desc_get_layer_count(&src->desc);
+    read_info.srcImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    read_info.regionCount = 1;
+    read_info.pRegions = &region;
+    write_info.dstImage = dst->res.vk_image;
+    write_info.dstImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    write_info.regionCount = 1;
+    write_info.pRegions = &region;
+
+    for (level = 0; level < d3d12_resource_desc_get_active_level_count(&src->desc); level++)
+    {
+        region.imageSubresource.mipLevel = level;
+        region.imageExtent = d3d12_resource_desc_get_subresource_extent(&src->desc, src->format, level);
+        size = (VkDeviceSize)vkd3d_compute_workgroup_count(region.imageExtent.width, src->format->block_width) *
+                vkd3d_compute_workgroup_count(region.imageExtent.height, src->format->block_height) * region.imageExtent.depth *
+                region.imageSubresource.layerCount * src->format->byte_count * src->format->block_byte_count;
+        size = align(size, 4);
+        if (size > UINT32_MAX || !d3d12_command_allocator_allocate_scratch_memory(list->allocator,
+                VKD3D_SCRATCH_POOL_KIND_DEVICE_STORAGE, 2 * size, 16, ~0u, &scratch))
+        {
+            d3d12_command_list_mark_as_invalid(list, "Cannot allocate predicated texture copy scratch.");
+            break;
+        }
+
+        read_info.dstBuffer = scratch.buffer;
+        read_info.srcImage = src->res.vk_image;
+        region.bufferOffset = scratch.offset;
+        VK_CALL(vkCmdCopyImageToBuffer2(list->cmd.vk_command_buffer, &read_info));
+        read_info.srcImage = dst->res.vk_image;
+        region.bufferOffset += size;
+        VK_CALL(vkCmdCopyImageToBuffer2(list->cmd.vk_command_buffer, &read_info));
+
+        memory.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        memory.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        memory.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        memory.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+        VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep));
+
+        args.predicate_va = list->predication.va;
+        args.src_va = scratch.va;
+        args.dst_va = scratch.va + size;
+        args.word_count = size / 4;
+        VK_CALL(vkCmdBindPipeline(list->cmd.vk_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ops->vk_copy_pipeline));
+        d3d12_command_list_meta_push_data(list, list->cmd.vk_command_buffer,
+                ops->vk_copy_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, sizeof(args), &args);
+        VK_CALL(vkCmdDispatch(list->cmd.vk_command_buffer, min(vkd3d_compute_workgroup_count(args.word_count, 64), 65535u), 1, 1));
+
+        /* Include the initial transfer write for the predicate-false case. */
+        memory.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        memory.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+        memory.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        memory.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep));
+        write_info.srcBuffer = scratch.buffer;
+        VK_CALL(vkCmdCopyBufferToImage2(list->cmd.vk_command_buffer, &write_info));
+    }
+
+    dep.imageMemoryBarrierCount = 2;
+    for (i = 0; i < 2; i++)
+    {
+        images[i].srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        images[i].srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        images[i].dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        images[i].dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        images[i].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        images[i].newLayout = resources[i]->common_layout;
+    }
+    VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep));
+    d3d12_command_list_update_conditional_rendering_state(list, false);
+    list->cmd.estimated_cost += VKD3D_COMMAND_COST_HIGH;
+    return true;
+}
+
 static void STDMETHODCALLTYPE d3d12_command_list_CopyResource(d3d12_command_list_iface *iface,
         ID3D12Resource *dst, ID3D12Resource *src)
 {
@@ -11276,6 +11413,10 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyResource(d3d12_command_list
 
     dst_resource = impl_from_ID3D12Resource(dst);
     src_resource = impl_from_ID3D12Resource(src);
+
+    if (d3d12_command_list_copy_resource_predicated(list, dst_resource, src_resource))
+        return;
+
 
     if (list->type == D3D12_COMMAND_LIST_TYPE_COPY)
     {

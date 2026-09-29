@@ -4995,8 +4995,18 @@ struct vkd3d_predicate_resolve_args
     VkBool32 invert;
 };
 
+struct vkd3d_predicated_copy_args
+{
+    VkDeviceAddress predicate_va;
+    VkDeviceAddress src_va;
+    VkDeviceAddress dst_va;
+    uint32_t word_count;
+};
+
 struct vkd3d_predicate_ops
 {
+    VkPipelineLayout vk_copy_pipeline_layout;
+    VkPipeline vk_copy_pipeline;
     VkPipelineLayout vk_command_pipeline_layout;
     VkPipelineLayout vk_resolve_pipeline_layout;
     VkPipeline vk_command_pipelines[VKD3D_PREDICATE_COMMAND_COUNT];

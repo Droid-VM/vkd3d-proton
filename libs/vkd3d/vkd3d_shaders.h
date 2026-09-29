@@ -44,6 +44,7 @@ enum vkd3d_meta_copy_mode
 #include <cs_predicate_command.h>
 #include <cs_resolve_binary_queries.h>
 #include <cs_resolve_predicate.h>
+#include <cs_predicated_copy.h>
 #include <cs_resolve_query.h>
 #include <cs_emit_nv_memory_decompression_regions.h>
 #include <cs_emit_nv_memory_decompression_workgroups.h>

@@ -4259,6 +4259,74 @@ static void prepare_instanced_draw(struct test_context *context)
     ID3D12GraphicsCommandList_RSSetScissorRects(command_list, 1, &context->scissor_rect);
 }
 
+void test_conditional_copy_resource(void)
+{
+    static const uint64_t predicates[] = {0, 1, (uint64_t)1 << 32};
+    D3D12_HEAP_PROPERTIES heap = {D3D12_HEAP_TYPE_DEFAULT};
+    D3D12_RESOURCE_DESC desc = {0};
+    D3D12_SUBRESOURCE_DATA data[6];
+    uint32_t pixels[6][35];
+    ID3D12Resource *src, *dst, *conditions;
+    struct test_context context;
+    unsigned int p, op, i, j;
+    HRESULT hr;
+
+    if (!init_test_context(&context, NULL))
+        return;
+    conditions = create_upload_buffer(context.device, sizeof(predicates), predicates);
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = 7;
+    desc.Height = 5;
+    desc.DepthOrArraySize = 2;
+    desc.MipLevels = 3;
+    desc.Format = DXGI_FORMAT_R32_UINT;
+    desc.SampleDesc.Count = 1;
+
+    for (p = 0; p < ARRAY_SIZE(predicates); p++)
+    for (op = 0; op < 2; op++)
+    {
+        vkd3d_test_set_context("predicate %u, op %u", p, op);
+        hr = ID3D12Device_CreateCommittedResource(context.device, &heap, D3D12_HEAP_FLAG_NONE,
+                &desc, D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void **)&src);
+        ok(hr == S_OK, "Failed to create source, hr %#x.\n", (unsigned int)hr);
+        hr = ID3D12Device_CreateCommittedResource(context.device, &heap, D3D12_HEAP_FLAG_NONE,
+                &desc, D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void **)&dst);
+        ok(hr == S_OK, "Failed to create destination, hr %#x.\n", (unsigned int)hr);
+        for (i = 0; i < 6; i++)
+        {
+            for (j = 0; j < 35; j++)
+                pixels[i][j] = 0x12340000 + i;
+            data[i].pData = pixels[i];
+            data[i].RowPitch = max(7u >> (i % 3), 1u) * sizeof(uint32_t);
+            data[i].SlicePitch = data[i].RowPitch * max(5u >> (i % 3), 1u);
+        }
+        upload_texture_data(src, data, 6, context.queue, context.list);
+        reset_command_list(context.list, context.allocator);
+        for (i = 0; i < 6; i++)
+            for (j = 0; j < 35; j++)
+                pixels[i][j] = 0x56780000 + i;
+        upload_texture_data(dst, data, 6, context.queue, context.list);
+        reset_command_list(context.list, context.allocator);
+        transition_resource_state(context.list, src, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        ID3D12GraphicsCommandList_SetPredication(context.list, conditions, p * sizeof(uint64_t), op);
+        ID3D12GraphicsCommandList_CopyResource(context.list, dst, src);
+        ID3D12GraphicsCommandList_SetPredication(context.list, NULL, 0, 0);
+        transition_resource_state(context.list, dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        for (i = 0; i < 6; i++)
+        {
+            bool copy = op == D3D12_PREDICATION_OP_EQUAL_ZERO ? predicates[p] != 0 : predicates[p] == 0;
+            check_sub_resource_uint(dst, i, context.queue, context.list,
+                    (copy ? 0x12340000 : 0x56780000) + i, 0);
+            reset_command_list(context.list, context.allocator);
+        }
+        ID3D12Resource_Release(src);
+        ID3D12Resource_Release(dst);
+    }
+    vkd3d_test_set_context(NULL);
+    ID3D12Resource_Release(conditions);
+    destroy_test_context(&context);
+}
+
 void test_conditional_rendering(void)
 {
     D3D12_ROOT_SIGNATURE_DESC root_signature_desc;
