@@ -5037,6 +5037,51 @@ HRESULT vkd3d_get_resource_subresource_layout(ID3D12Resource *resource, unsigned
     return S_OK;
 }
 
+/* The native runtime writes directly into the staging pointer, bypassing
+ * WriteToSubresource. Publish those writes when it releases the heap map. */
+HRESULT vkd3d_flush_resource_cpu_writes(ID3D12Resource *resource)
+{
+    struct d3d12_resource *object = impl_from_ID3D12Resource(resource);
+    struct d3d12_device *device = object->device;
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    VkMappedMemoryRange range = {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+    VkOffset3D offset = {0, 0, 0};
+    unsigned int i, count;
+    VkExtent3D extent;
+    D3D12_BOX box;
+    VkResult vr;
+    HRESULT hr;
+
+    if (!d3d12_resource_is_texture(object) || !d3d12_resource_is_cpu_accessible(object) ||
+            !object->mem.cpu_address)
+        return S_OK;
+
+    if (!(device->memory_properties.memoryTypes[object->mem.device_allocation.vk_memory_type].propertyFlags &
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+    {
+        range.memory = object->mem.device_allocation.vk_memory;
+        range.offset = object->mem.offset;
+        range.size = object->mem.resource.size;
+        vkd3d_mapped_memory_range_align(device, &range, object->mem.device_allocation.size);
+        if ((vr = VK_CALL(vkFlushMappedMemoryRanges(device->vk_device, 1, &range))) < 0)
+            return hresult_from_vk_result(vr);
+    }
+
+    if (!(object->flags & VKD3D_RESOURCE_LINEAR_STAGING_COPY))
+        return S_OK;
+
+    count = d3d12_resource_get_sub_resource_count(object);
+    for (i = 0; i < count; ++i)
+    {
+        d3d12_resource_get_subresource_box(object, i, &box);
+        extent = (VkExtent3D){box.right, box.bottom, box.back};
+        if (FAILED(hr = vkd3d_memory_transfer_queue_write_subresource(&device->memory_transfers,
+                object, i, offset, extent)))
+            return hr;
+    }
+    return S_OK;
+}
+
 #endif /* VKD3D_BUILD_UMD */
 
 /* CBVs, SRVs, UAVs */
