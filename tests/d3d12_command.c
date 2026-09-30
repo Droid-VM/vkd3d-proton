@@ -2802,6 +2802,7 @@ void test_execute_indirect_state(void)
     for (i = 0; i < ARRAY_SIZE(tests); i++)
     {
         struct vec4 expect_reset_state[2];
+        float reset_components[4];
         const struct vec4 *expect, *v;
         uint32_t expected_output_size;
         uint32_t clear_vbo_mask;
@@ -2952,7 +2953,7 @@ void test_execute_indirect_state(void)
         }
 
         clear_vbo_mask = 0;
-        expect_reset_state[0] = values;
+        memcpy(reset_components, &values, sizeof(reset_components));
 
         /* Root constant state is cleared to zero if it's part of the signature. */
         for (j = 0; j < tests[i].indirect_argument_count; j++)
@@ -2960,12 +2961,13 @@ void test_execute_indirect_state(void)
             if (tests[i].indirect_arguments[j].Type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT)
             {
                 for (k = 0; k < tests[i].indirect_arguments[j].Constant.Num32BitValuesToSet; k++)
-                    (&expect_reset_state[0].x)[(tests[i].indirect_arguments[j].Constant.DestOffsetIn32BitValues + k) % 4] = 0.0f;
+                    reset_components[(tests[i].indirect_arguments[j].Constant.DestOffsetIn32BitValues + k) % 4] = 0.0f;
             }
             else if (tests[i].indirect_arguments[j].Type == D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW)
                 clear_vbo_mask |= 1u << tests[i].indirect_arguments[j].VertexBuffer.Slot;
         }
 
+        memcpy(&expect_reset_state[0], reset_components, sizeof(reset_components));
         expect_reset_state[1] = expect_reset_state[0];
 
         /* VBO/IBO state is cleared to zero if it's part of the signature.
